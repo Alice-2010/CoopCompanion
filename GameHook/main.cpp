@@ -1,6 +1,7 @@
 #include "hooks.h"
 #include "logging.h"
 #include "ui.h"
+#include "socket.h"
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_dx9.h"
 #include "imgui/imgui_impl_win32.h"
@@ -29,6 +30,7 @@ void Shutdown()
         ImGui::DestroyContext();
         g_imguiInitialized = false;
     }
+    if (IsSocketConnected()) SocketClose();
 }
 
 BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)

@@ -6,20 +6,21 @@
 
 static SOCKET g_socket = INVALID_SOCKET;
 
-void CloseSocket()
+void SocketClose()
 {
-    if (g_socket == INVALID_SOCKET)
-        return;
-
-    shutdown(g_socket, SD_BOTH);
-    closesocket(g_socket);
-    g_socket = INVALID_SOCKET;
+    if (IsSocketConnected()) {
+        SocketSend("{\"type\":\"disconnect\"}");
+        shutdown(g_socket, SD_BOTH);
+        closesocket(g_socket);
+        g_socket = INVALID_SOCKET;
+    }
     WSACleanup();
+    DebugLog("Disconnected from server.\n");
 }
 
-void ConnectSocket()
+void SocketConnect()
 {
-    if (g_socket != INVALID_SOCKET)
+    if (IsSocketConnected())
         return;
 
     WSADATA wsaData;
@@ -35,14 +36,14 @@ void ConnectSocket()
 
     ZeroMemory(&hints, sizeof(hints));
     hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_socktype = SOCK_DGRAM;
     hints.ai_protocol = IPPROTO_UDP;
 
     iResult = getaddrinfo(SOCKET_SERVER, SOCKET_PORT, &hints, &result);
     if (iResult != 0)
     {
         DebugLogF("getaddrinfo failed: %d\n", iResult);
-        WSACleanup();
+        SocketClose();
         return;
     }
 
@@ -51,36 +52,39 @@ void ConnectSocket()
     {
         DebugLogF("Error at socket(): %ld\n", WSAGetLastError());
         freeaddrinfo(result);
-        WSACleanup();
+        SocketClose();
         return;
     }
 
     iResult = connect( g_socket, result->ai_addr, (int)result->ai_addrlen);
+    freeaddrinfo(result);
     if (iResult == SOCKET_ERROR)
     {
         DebugLogF("Error at connect(): %ld\n", WSAGetLastError());
-        CloseSocket();
-    }
-
-    freeaddrinfo(result);
-    if (g_socket == INVALID_SOCKET)
-    {
-        DebugLogF("Unable to connect to server!\n");
-        WSACleanup();
+        SocketClose();
         return;
     }
+
+    if (g_socket == INVALID_SOCKET)
+    {
+        DebugLog("Unable to connect to server!\n");
+        SocketClose();
+        return;
+    }
+    SocketSend("{\"type\":\"connect\"}");
+    DebugLog("Connected to server.\n");
 }
 
 void SocketRecv(char* buffer)
 {
-    if (g_socket == INVALID_SOCKET)
+    if (!IsSocketConnected())
         return;
 
     int iResult = recv(g_socket, buffer, sizeof(buffer), 0);
     if (iResult == 0)
     {
         DebugLog("Connection closed by server.\n");
-        CloseSocket();
+        SocketClose();
         return;
     }
     else if (iResult == SOCKET_ERROR)
@@ -92,13 +96,18 @@ void SocketRecv(char* buffer)
 
 void SocketSend(const char* sendbuf)
 {
-    if (g_socket == INVALID_SOCKET)
+    if (!IsSocketConnected())
         return;
 
     int iResult = send(g_socket, sendbuf, (int)strlen(sendbuf), 0);
     if (iResult == SOCKET_ERROR)
     {
         DebugLogF("send failed: %d\n", WSAGetLastError());
-        CloseSocket();
+        SocketClose();
     }
+}
+
+bool IsSocketConnected()
+{
+    return g_socket != INVALID_SOCKET;
 }

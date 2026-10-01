@@ -1,8 +1,16 @@
 #include "ui.h"
 #include "hooks.h"
+#include "imgui/imgui.h"
 #include "logging.h"
+#include "socket.h"
 #include "imgui/imgui_impl_dx9.h"
 #include "imgui/imgui_impl_win32.h"
+
+HWND g_gameWindow = nullptr;
+WNDPROC g_originalWndProc = nullptr;
+bool g_imguiInitialized = false;
+bool g_menuOpen = true;
+int g_overlayCursorShowCalls = 0;
 
 void InitImGui(IDirect3DDevice9* device)
 {
@@ -53,19 +61,33 @@ void RenderImGui()
 
     if (g_menuOpen)
     {
-        ImGui::Begin("Alice Coop Companion", nullptr, ImGuiWindowFlags_NoCollapse);
+        ImGui::Begin("Alice Coop Companion", &g_menuOpen, ImGuiWindowFlags_NoCollapse);
         if (ImGui::BeginTabBar("CompanionGroups"))
         {
             if (ImGui::BeginTabItem("Main"))
             {
-                ImGui::Text("Overlay injected.");
-                ImGui::Text("Press Insert to toggle this menu.");
+                if (IsSocketConnected())
+                {
+                    if (ImGui::Button("Disconnect from Companion")) SocketClose();
+                    ImGui::Separator();
+                }
+                else
+                {
+                    if (ImGui::Button("Connect to Companion")) SocketConnect();
+                }
                 ImGui::EndTabItem();
             }
 
             if (ImGui::BeginTabItem("Logs"))
             {
-                ImGui::InputTextMultiline("##Logs", g_logBuffer, sizeof(g_logBuffer), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 16), ImGuiInputTextFlags_ReadOnly);
+                char* logBuffer = GetLogBuffer();
+                ImGui::InputTextMultiline(
+                    "##Logs",
+                    logBuffer,
+                    sizeof(logBuffer), 
+                    ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 16),
+                    ImGuiInputTextFlags_ReadOnly
+                );
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
