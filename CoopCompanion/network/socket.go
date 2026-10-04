@@ -1,11 +1,13 @@
 package network
 
 import (
+	"alice-coop-companion/config"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -23,7 +25,6 @@ type Session struct {
 
 const (
 	serverAddress string = "0.0.0.0"
-	serverPort    int    = 7243
 
 	playerTypeHost PlayerType = "host"
 	playerTypeJoin PlayerType = "join"
@@ -33,6 +34,15 @@ var (
 	conn     *net.UDPConn
 	sessions = map[string]Session{}
 )
+
+func createSessionID() string {
+	chars := "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	var id strings.Builder
+	for i := range 10 {
+		id.WriteString(string(chars[i%len(chars)]))
+	}
+	return id.String()
+}
 
 func GetClientSessionFunc(s func(Session) bool, c func(SocketClient) bool) (string, *Session, int, *SocketClient) {
 	for sID, session := range sessions {
@@ -47,15 +57,6 @@ func GetClientSessionFunc(s func(Session) bool, c func(SocketClient) bool) (stri
 	return "", nil, -1, nil
 }
 
-func GetSessionFunc(s func(Session) bool) (string, *Session) {
-	for sID, session := range sessions {
-		if s(session) {
-			return sID, &session
-		}
-	}
-	return "", nil
-}
-
 func GetClientFunc(s Session, f func(SocketClient) bool) (int, *SocketClient) {
 	for index, client := range s.Clients {
 		if f(client) {
@@ -65,15 +66,16 @@ func GetClientFunc(s Session, f func(SocketClient) bool) (int, *SocketClient) {
 	return -1, nil
 }
 
-func SocketListen() {
+func SocketListen(port int) error {
 	c, err := net.ListenUDP("udp", &net.UDPAddr{
 		IP:   net.ParseIP(serverAddress),
-		Port: serverPort,
+		Port: port,
 	})
 	if err != nil {
-		panic(err)
+		return err
 	}
 	conn = c
+	return nil
 }
 
 func SocketClose() {
@@ -83,8 +85,9 @@ func SocketClose() {
 }
 
 func SocketRecv() (*Session, *SocketClient, *SocketData) {
+	logger := config.GetLogger()
 	if conn == nil {
-		fmt.Println("Socket is not initialized")
+		logger.Error("Socket is not initialized")
 		return nil, nil, nil
 	}
 	b := make([]byte, 1024)
@@ -94,23 +97,23 @@ func SocketRecv() (*Session, *SocketClient, *SocketData) {
 	n, addr, err := conn.ReadFromUDP(b)
 	if err != nil {
 		if errors.Is(err, net.ErrClosed) {
-			fmt.Println("Socket is closed")
+			logger.Error("Socket is closed")
 			return nil, nil, nil
 		} else if errors.Is(err, os.ErrDeadlineExceeded) {
 			// Timeout occurred, continue to the next iteration to check for closing signal
 			return nil, nil, nil
 		}
-		fmt.Printf("Error receiving data: %v\n", err)
+		logger.Error(fmt.Sprintf("Error receiving data: %v", err))
 		return nil, nil, nil
 	}
 
 	data := new(SocketData)
 	if err := json.Unmarshal(b[:n], data); err != nil {
-		fmt.Printf("Error unmarshaling data: %v\n", err)
+		logger.Error(fmt.Sprintf("Error unmarshaling data: %v", err))
 		return nil, nil, nil
 	}
 	if err := data.Validate(); err != nil {
-		fmt.Printf("Invalid data received: %v\n", err)
+		logger.Error(fmt.Sprintf("Invalid data received: %v", err))
 		return nil, nil, nil
 	}
 
@@ -129,14 +132,15 @@ func SocketRecv() (*Session, *SocketClient, *SocketData) {
 			}
 		}
 		if !isAlreadyInSession {
-			sessionID := "abcdefghik" // TODO: Generate a unique session ID
+			logger.Info(fmt.Sprintf("Creating new session for host: %s", addr))
+			sessionID := createSessionID()
 			sessions[sessionID] = Session{
 				ID:        sessionID,
 				CreatedAt: time.Now(),
 				Clients:   []SocketClient{{addr: addr, ConnectedAt: time.Now(), PlayerType: playerTypeHost}},
 			}
 		} else {
-			fmt.Printf("Ignoring data from already connected host: %s\n", addr)
+			logger.Error(fmt.Sprintf("Ignoring data from already connected host: %s", addr))
 			return nil, nil, nil
 		}
 	}
@@ -147,57 +151,58 @@ func SocketRecv() (*Session, *SocketClient, *SocketData) {
 	)
 
 	if sID == "" || session == nil || playerIndex == -1 || player == nil {
-		fmt.Printf("Ignoring data from unknown client: %s\n", addr)
+		logger.Error(fmt.Sprintf("Ignoring data from unknown client: %s", addr))
 		return nil, nil, nil
 	}
 
 	switch data.Type {
 	case socketDataTypeHost:
-		fmt.Printf("Host connected from %s\n", addr)
+		logger.Info(fmt.Sprintf("Host connected from %s", addr))
 	case socketDataTypeJoin:
 		if len(session.Clients) == 2 {
-			fmt.Printf("Player has already joined\n")
+			logger.Info("Player has already joined")
 			SocketSend(player, &SocketData{Type: socketDataTypeJoinDeclined})
 			return nil, nil, nil
 		}
 		session.Clients = append(session.Clients, SocketClient{addr: addr, ConnectedAt: time.Now(), PlayerType: playerTypeJoin})
-		fmt.Printf("Player connected from %s\n", addr)
+		logger.Info(fmt.Sprintf("Player connected from %s", addr))
 	case socketDataTypeLeave:
-		fmt.Printf("Client %s left the game\n", addr)
+		logger.Info(fmt.Sprintf("Client %s left the game", addr))
 		if len(session.Clients) == 1 {
 			delete(sessions, sID)
-			fmt.Printf("Last client left, deleting session %s\n", sID)
+			logger.Info(fmt.Sprintf("Last client left, deleting session %s", sID))
 		} else if player.PlayerType == playerTypeHost {
 			session.Clients = append(session.Clients[:playerIndex], session.Clients[playerIndex+1:]...)
 			session.Clients[0].PlayerType = playerTypeHost
-			fmt.Println("Host left, player 2 has become host")
+			logger.Info("Host left, player 2 has become host")
 		} else {
 			session.Clients = append(session.Clients[:playerIndex], session.Clients[playerIndex+1:]...)
-			fmt.Printf("Player %s left, host remains\n", addr)
+			logger.Info(fmt.Sprintf("Player %s left, host remains", addr))
 		}
 	}
-	fmt.Printf("Received %d bytes from %s: %v\n", n, addr, data)
+	logger.Debug(fmt.Sprintf("Received %d bytes from %s: %v", n, addr, data))
 	return session, player, data
 }
 
 func SocketSend(client *SocketClient, data *SocketData) {
+	logger := config.GetLogger()
 	if conn == nil {
-		fmt.Println("Socket is not initialized")
+		logger.Error("Socket is not initialized")
 		return
 	}
 	if client == nil || client.addr == nil {
-		fmt.Println("No destination specified")
+		logger.Error("No destination specified")
 		return
 	}
 
 	buffer, err := json.Marshal(data)
 	if err != nil {
-		fmt.Printf("Error marshaling data: %v\n", err)
+		logger.Error(fmt.Sprintf("Error marshaling data: %v", err))
 		return
 	}
 	if _, err := conn.WriteToUDP(buffer, client.addr); err != nil {
-		fmt.Printf("Error sending data: %v\n", err)
+		logger.Error(fmt.Sprintf("Error sending data: %v", err))
 		return
 	}
-	fmt.Printf("Sent %d bytes to %s: %v\n", len(buffer), client.addr, data)
+	logger.Debug(fmt.Sprintf("Sent %d bytes to %s: %v", len(buffer), client.addr, data))
 }
