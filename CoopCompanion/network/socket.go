@@ -20,6 +20,7 @@ type SocketClient struct {
 type Session struct {
 	ID        string
 	CreatedAt time.Time
+	Version   GameVersionHash
 	Clients   []SocketClient
 }
 
@@ -38,7 +39,10 @@ var (
 func createSessionID() string {
 	chars := "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	var id strings.Builder
-	for i := range 10 {
+	for i := range 14 {
+		if i == 4 || i == 10 {
+			id.WriteString("-")
+		}
 		id.WriteString(string(chars[i%len(chars)]))
 	}
 	return id.String()
@@ -118,31 +122,47 @@ func SocketRecv() (*Session, *SocketClient, *SocketData) {
 	}
 
 	// Determine which client sent the data
-	if data.Type == socketDataTypeHost {
-		isAlreadyInSession := false
-		for _, session := range sessions {
-			for _, client := range session.Clients {
-				if client.addr.String() == addr.String() {
-					isAlreadyInSession = true
-					break
-				}
-			}
-			if isAlreadyInSession {
+	isAlreadyInSession := false
+	for _, session := range sessions {
+		for _, client := range session.Clients {
+			if client.addr.String() == addr.String() {
+				isAlreadyInSession = true
 				break
 			}
 		}
-		if !isAlreadyInSession {
+		if isAlreadyInSession {
+			break
+		}
+	}
+	if !isAlreadyInSession && (data.Type == socketDataTypeJoin || data.Type == socketDataTypeHost) {
+		switch data.Type {
+		case socketDataTypeJoin:
+			logger.Info(fmt.Sprintf("Player joining session: %s", addr))
+			session, ok := sessions[data.SessionID]
+			if !ok {
+				logger.Error(fmt.Sprintf("Session %s does not exist", data.SessionID))
+				return nil, nil, nil
+			}
+			if len(session.Clients) >= 2 {
+				logger.Error(fmt.Sprintf("Session %s is full", data.SessionID))
+				SocketSend(&SocketClient{addr: addr}, &SocketData{Type: socketDataTypeJoinDeclined})
+				return nil, nil, nil
+			}
+			session.Clients = append(session.Clients, SocketClient{addr: addr, ConnectedAt: time.Now(), PlayerType: playerTypeJoin})
+			sessions[data.SessionID] = session
+		case socketDataTypeHost:
 			logger.Info(fmt.Sprintf("Creating new session for host: %s", addr))
 			sessionID := createSessionID()
 			sessions[sessionID] = Session{
 				ID:        sessionID,
 				CreatedAt: time.Now(),
+				Version:   data.Version,
 				Clients:   []SocketClient{{addr: addr, ConnectedAt: time.Now(), PlayerType: playerTypeHost}},
 			}
-		} else {
-			logger.Error(fmt.Sprintf("Ignoring data from already connected host: %s", addr))
-			return nil, nil, nil
 		}
+	} else {
+		logger.Error(fmt.Sprintf("Ignoring data from already connected host: %s", addr))
+		return nil, nil, nil
 	}
 
 	sID, session, playerIndex, player := GetClientSessionFunc(
@@ -156,16 +176,6 @@ func SocketRecv() (*Session, *SocketClient, *SocketData) {
 	}
 
 	switch data.Type {
-	case socketDataTypeHost:
-		logger.Info(fmt.Sprintf("Host connected from %s", addr))
-	case socketDataTypeJoin:
-		if len(session.Clients) == 2 {
-			logger.Info("Player has already joined")
-			SocketSend(player, &SocketData{Type: socketDataTypeJoinDeclined})
-			return nil, nil, nil
-		}
-		session.Clients = append(session.Clients, SocketClient{addr: addr, ConnectedAt: time.Now(), PlayerType: playerTypeJoin})
-		logger.Info(fmt.Sprintf("Player connected from %s", addr))
 	case socketDataTypeLeave:
 		logger.Info(fmt.Sprintf("Client %s left the game", addr))
 		if len(session.Clients) == 1 {
